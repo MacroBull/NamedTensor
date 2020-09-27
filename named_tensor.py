@@ -41,6 +41,7 @@ def is_namedtuple(value:'Any')->bool:
 class FrozenDict(dict):
     r"""immutable 'dict'"""
 
+    __delitem__ = property(doc='Disabled method')
     clear       = property(doc='Disabled method')
     pop         = property(doc='Disabled method')
     popitem     = property(doc='Disabled method')
@@ -53,11 +54,6 @@ class FrozenDict(dict):
         super().__init__(*args, **kwargs)
         del self._mutable
 
-    def __delitem__(self, key:Hashable):
-        if not getattr(self, '_mutable', False):
-            raise AttributeError(f'{type(self).__name__!r} is immutable')
-        return super().__delitem__(key)
-
     def __setitem__(self, key:Hashable, value:'Any'):
         if not getattr(self, '_mutable', False):
             raise AttributeError(f'{type(self).__name__!r} is immutable')
@@ -69,11 +65,14 @@ class FrozenOrderedDict(FrozenDict, OrderedDict):
 
     move_to_end = property(doc='Disabled method')
 
-    def __getitem__(self, indices:'Any')->'Any':
-        # NOTE: disable text iterating
-        if isinstance(indices, Iterable) and not isinstance(indices, (str, bytes, bytearray)):
-            return type(self)(zip(indices, (self[i] for i in indices)))
 
+### NamedAxes ###
+
+
+class SliceableFrozenOrderedDict(FrozenOrderedDict):
+    r"""'SliceableFrozenOrderedDict' with slice range index support"""
+
+    def __getitem__(self, indices:'Any')->'Any':
         if isinstance(indices, slice):
             keys = list(self.keys())
             values = list(self.values())
@@ -88,22 +87,20 @@ class FrozenOrderedDict(FrozenDict, OrderedDict):
         return super().__getitem__(indices)
 
 
-### NamedAxes ###
-
-
 def make_axes(info:PartialAxesInfo,
               cls_name:'Optional[str]'=None)->NamedAxes:
     r"""create 'NamedAxes' from 'PartialAxesInfo'"""
 
     if is_integer(info):
         assert info >= 0, f'naxis({info}) should be non-negative'
-        assert cls_name is None, 'unnamed axes cannot have class name'
+        assert cls_name is None, f'unnamed axes({info}) cannot have class name'
 
         return info
 
     if isinstance(info, Iterable):
         info = list(info)
         try:
+            # try parsing as Mapping[NamedIndex, int] tuples
             axes = dict(info) # throw TypeError, ValueError
             assert all(map(is_integer, axes.values())), 'mapped indices should be integers'
 
@@ -113,10 +110,12 @@ def make_axes(info:PartialAxesInfo,
         except IndexError:
             raise ValueError('bad axis indices')
         except (TypeError, ValueError):
+            # fallback to enumerate indices for axes
             assert all(map(lambda axis: isinstance(axis, NamedIndex), info))
 
             axes = dict(zip(info, range(len(info))))
         else:
+            # sort name by indices
             axes_ = axes
             axes = {k: v if v >= 0 else len(axes) + v for k, v in axes.items()}
             keys = sorted(axes.keys(), key=axes.get)
@@ -138,8 +137,8 @@ def axis2index(axes:NamedAxes, axis:ConvertableAxisClass)->IndexClass:
     if axis is None:
         return axis
 
-    # NOTE: disable text iterating
-    if isinstance(axis, Collection) and not isinstance(axis, (str, bytes, bytearray)):
+    # NOTE: iterating until hashable
+    if isinstance(axis, Collection) and not isinstance(axis, Hashable):
         iter_index = (axis2index(axes, a) for a in axis)
         if isinstance(axis, np.ndarray): # force list output for numpy array
             return list(iter_index)
@@ -156,7 +155,8 @@ def axis2index(axes:NamedAxes, axis:ConvertableAxisClass)->IndexClass:
     if is_namedtuple(axes):
         return getattr(axes, axis)
 
-    assert is_integer(axes) and is_integer(axis), 'unnamed axis should be integer'
+    # fallback to int axes with int axis
+    assert is_integer(axes) and is_integer(axis), f'unnamed axis({axis!r}) should be integer'
 
     return axis
 
@@ -179,7 +179,7 @@ def axesiter(axes:NamedAxes)->'Iterator[NamedIndex]':
 ### NamedDims ###
 
 
-class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, NamedAxes]
+class FixedShapeNamedDims(SliceableFrozenOrderedDict):
     r"""Named dims class with immutable shape"""
 
     # class NotSet(object):
@@ -194,16 +194,18 @@ class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, Na
                  *args,
                  dict_axes:bool=False,
                  **kwargs):
-        upper = OrderedDict(*args, **kwargs) # FIXME: named_tuple narrowed into tuple
+        upper = OrderedDict(*args, **kwargs)
         for dim, axes in upper.items():
-            cls_name = None if dict_axes else dim
-            try:
-                axes = make_axes(axes, cls_name=cls_name)
-            except (AssertionError, ValueError):
-                axes = make_axes(axes)
-            upper[dim] = FrozenOrderedDict(axes) if isinstance(axes, dict) else axes
+            if not is_namedtuple(axes):
+                try:
+                    assert not dict_axes
+                    axes = make_axes(axes, cls_name=dim)
+                except (ValueError, AssertionError):
+                    axes = make_axes(axes)
+            upper[dim] = SliceableFrozenOrderedDict(axes) if isinstance(axes, dict) else axes
         super().__init__(upper)
-        self._update_dims()
+        self._dims = tuple(self.keys())
+        self._dim_axes = tuple(self.values())
 
     @property
     def dims(self)->'Sequence[NamedIndex]':
@@ -250,11 +252,11 @@ class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, Na
             if idx_dim < 0:
                 break
 
-    def axes(self, dim:'Union[int, NamedIndex]')->'Sequence[NamedIndex]':
+    def axes(self, dim:NamedIndex)->'Sequence[NamedIndex]':
         r"""axes getter"""
 
         axes = self[dim] # disable idx_dim access
-        # axes = self.get(dim) or self._dim_axes[dim]
+        # axes = self.get(dim) or self._dim_axes[dim] # dim:'Union[int, NamedIndex]'
         return tuple(axesiter(axes))
 
     def axes2indices(
@@ -269,11 +271,11 @@ class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, Na
         if isinstance(axes, dict):
             indices = []
             for dim, axes_ in self.items():
-                if dim in axes and axes[dim] is None:
+                axis = axes.get(dim)
+                if axis is None and dim in axes:
                     warnings.warn(f'it does not make sense using None(at dim {dim!r}) '
                                   'in a named index, it whould be translated into '
                                   'slice(None)(i.e. :)')
-                axis = axes.get(dim)
                 index = slice(None) if axis is None else axis2index(axes_, axis)
                 indices.append(index)
             return tuple(indices)
@@ -311,34 +313,36 @@ class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, Na
 
         return tuple(indices)
 
-    def rename_dim(self, old:NamedIndex, new:NamedIndex):
-        r"""rename a dim"""
+    def replace_dim(self, old:NamedIndex, new:NamedIndex):
+        r"""create a new dim-renamed one"""
 
-        assert new not in self, f'new dim({new}) is confilicted'
+        assert new not in self, f'new dim({new!r}) is confilicted'
 
         ret = OrderedDict()
         for dim, axes in self.items():
-            ret[new if dim == old else dim] = axes # HINT: tuple class name not renamed
+            if dim == old:
+                if is_namedtuple(axes):
+                    axes = namedtuple(new, axes._fields)(*axes)
+                ret[new] = axes
+            else:
+                ret[old] = axes
 
-        OrderedDict.clear(self)
-        self._mutable = True
-        OrderedDict.update(self, ret)
-        del self._mutable
-        self._update_dims()
+        return type(self)(ret)
 
-    def rename_axis(self, dim:'Union[int, NamedIndex]',
-                    mapping_or_old:'Union[Mapping[NamedIndex, NamedIndex], NamedIndex]',
-                    new:'Optional[NamedIndex]'=None):
-        r"""rename an axis"""
+    def replace_axis(self, dim:NamedIndex,
+                     mapping_or_old:'Union[Mapping[NamedIndex, NamedIndex], NamedIndex]',
+                     new:'Optional[NamedIndex]'=None):
+        r"""create a new axis-renamed one"""
 
         axes = self[dim] # disable idx_dim access
-        # axes = self.get(dim) or self._dim_axes[dim]
+        # axes = self.get(dim) or self._dim_axes[dim] # dim:'Union[int, NamedIndex]'
         is_tuple_axes = is_namedtuple(axes)
-        assert isinstance(axes, dict) or is_tuple_axes, 'unnamed dim cannot be renamed'
+        assert isinstance(axes, dict) or is_tuple_axes, (
+            f'unnamed dim({dim!r}) cannot be renamed')
 
         axes_keys = axes._fields if is_tuple_axes else axes.keys()
         axes_iter = iter(zip(axes._fields, axes)) if is_tuple_axes else axes.items()
-        ret = OrderedDict()
+        axes_ = OrderedDict()
 
         if new is None:
             assert isinstance(mapping_or_old, dict), (
@@ -348,22 +352,22 @@ class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, Na
             mapping = mapping_or_old
             for axis, index in axes_iter:
                 axis = mapping.get(axis, axis)
-                assert axis not in ret, f'axis {axis} in mapping is conflicted'
+                assert axis not in axes_, f'axis {axis!r} in mapping is conflicted'
 
-                ret[axis] = index
+                axes_[axis] = index
         else:
-            assert new not in axes_keys, f'new axis({new}) is confilicted'
+            assert new not in axes_keys, f'new axis({new!r}) is confilicted'
 
             old = mapping_or_old
             for axis, index in axes_iter:
-                ret[new if axis == old else axis] = index
+                axes_[new if axis == old else axis] = index
 
-        ret = namedtuple(dim, ret.keys())(**ret) if is_tuple_axes else FrozenOrderedDict(ret)
+        axes_ = namedtuple(dim, axes_.keys())(**axes_) if is_tuple_axes else type(axes)(axes_)
+        ret = OrderedDict()
+        for dim_, axes in self.items():
+            ret[dim_] = axes_ if dim_ == dim else axes
 
-        self._mutable = True
-        self[dim] = ret
-        del self._mutable
-        self._update_dims()
+        return type(self)(ret)
 
     def tofile(self, filename:'Union[str, Path]'):
         r"""save data to file with dims info"""
@@ -377,10 +381,6 @@ class FixedShapeNamedDims(FrozenOrderedDict): # FrozenOrderedDict[NamedIndex, Na
                     file.write(f'axes={axes}\n')
                 else:
                     file.write(f'dim={axes}\n')
-
-    def _update_dims(self):
-        self._dims = tuple(self.keys())
-        self._dim_axes = tuple(self.values())
 
 
 def dims_from_df(
@@ -399,10 +399,12 @@ def dims_from_df(
         else:
             axes.sort()
             axes = OrderedDict(zip(axes, range(len(axes))))
+
         if cls_name is not None:
             axes = namedtuple(cls_name, axes.keys())(**axes)
+
         dims[dim] = axes
-    return dims
+    return FixedShapeNamedDims(dims)
 
 
 ### NamedTensor ###
@@ -423,7 +425,7 @@ class FixedShapeNamedTensor(object):
     	dim 1 for Size, with axes as Tiny, Small, Medium, Large
     A probability distribution tensor of a random chosen fruit can be written like:
     							Size
-    					Tiny	Small	Medium	Large
+				       	Tiny	Small	Medium	Large
     			Apple 	0.000	0.006	0.196	0.222
     	Fruit	Banana 	0.040	0.102	0.005	0.068
     			Coconut 0.172	0.163	0.000	0.026
@@ -562,17 +564,13 @@ class FixedShapeNamedTensor(object):
         shape = self._dims.shape
         if fill_value is None:
             data = np.empty(shape, **kwargs)
-            assert isinstance(data, self.DataClass), (
-                f'overload for create is required for non-default data class({type(data)})')
-
-            self._data = data
         else:
             data = np.full(shape, fill_value, **kwargs)
-            assert isinstance(data, self.DataClass), (
-                f'overload for create is required for non-default data class({type(data)})')
 
-            self._data = data
+        assert isinstance(data, self.DataClass), (
+            f'overload for create is required for non-default data class({type(data)})')
 
+        self._data = data
         return self.data
 
     def tofile(self, filename:'Union[str, Path]',
@@ -586,17 +584,17 @@ class FixedShapeNamedTensor(object):
         with open(dims_filename, mode='a') as file:
             file.write(f'dtype={self._data.dtype.name}\n')
 
-    def rename_dim(self,
-                   *args, **kwargs):
+    def replace_dim(self,
+                    *args, **kwargs):
         r"""shortcut for dims.rename_dim"""
 
-        return self._dims.rename_dim(*args, **kwargs)
+        return type(self)(data=self._data, dims=self._dims.replace_dim(*args, **kwargs))
 
-    def rename_axis(self,
-                    *args, **kwargs):
+    def replace_axis(self,
+                     *args, **kwargs):
         r"""shortcut for dims.rename_axis"""
 
-        return self._dims.rename_axis(*args, **kwargs)
+        return type(self)(data=self._data, dims=self._dims.replace_axis(*args, **kwargs))
 
     def _check_consistency(self):
         # assert self._dims.ndim == self._data.ndim
@@ -661,4 +659,3 @@ if __name__ == '__main__':
     print()
     print(open('/tmp/prob.bin.ini').read())
     print(open('/tmp/t.txt.ini').read())
-

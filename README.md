@@ -19,7 +19,7 @@ If we assign names for dims and axes like:
 A probability distribution tensor of a random chosen fruit can be written like:
 
 							Size
-					Tiny	Small	Medium	Large
+			       	Tiny	Small	Medium	Large
 			Apple 	0.000	0.006	0.196	0.222
 	Fruit	Banana 	0.040	0.102	0.005	0.068
 			Coconut 0.172	0.163	0.000	0.026
@@ -38,12 +38,20 @@ A NamedTensor could be accessed like:
 
 creation:
 ```python
-image = FixedShapeNamedTensor(dims=(('Batches', 4), ('Channels', 'RGB'), ('V', range(-6, 6)), ('U', range(-8, 8))))
+image = FixedShapeNamedTensor(
+	dims=(
+		('Batches', 4), 
+		('Channels', 'RGB'),
+		('V', range(-6, 6)),
+		('U', range(-8, 8))
+	))
 # image = <FixedShapeNamedTensor shape=(4, 3, 12, 16), dims=('Batches', 'Channels', 'V', 'U')>
-feature = FixedShapeNamedTensor(dims=(
-	('Positions', tuple(zip((3, -8, 0), range(3)))),
-	('Features', ('Objectness', 'dx', 'dy'))))
-# feature = <FixedShapeNamedTensor shape=(3, 3), dims=('Positions', 'Features')>
+feature = FixedShapeNamedTensor(
+	dims=(
+		('Locations', tuple(zip(((3, 0), (-8, 2)), range(3)))),
+		('Features', ('Objectness', 'dx', 'dy'))
+	))
+# feature = <FixedShapeNamedTensor shape=(2, 3), dims=('Locations', 'Features')>
 ```
 
 access:
@@ -52,7 +60,7 @@ image.dims['Channels'].B
 # >>> 2
 image[:, 'G', :0, :0]
 # >>> <a (4, 6, 8) sub tensor>
-feature[{'Features': 'Objectness', 'Positions': [0, 3]}]
+feature[{'Features': 'Objectness', 'Locations': [(-8, 2), (3, 0)]}]
 # >>> <a (2, ) sub tensor>
 ```
 
@@ -60,15 +68,12 @@ iteration
 ```python
 list(feature.dims.flat)
 # >>> 
-#	[(3, 'Objectness'),
-# 	(3, 'dx'),
-# 	(3, 'dy'),
-# 	(-8, 'Objectness'),
-# 	(-8, 'dx'),
-# 	(-8, 'dy'),
-# 	(0, 'Objectness'),
-# 	(0, 'dx'),
-# 	(0, 'dy')]
+#	[((3, 0), 'Objectness'),
+# 	 ((3, 0), 'dx'),
+# 	 ((3, 0), 'dy'),
+# 	 ((-8, 2), 'Objectness'),
+# 	 ((-8, 2), 'dx'),
+# 	 ((-8, 2), 'dy')]
 ```
 
 serialization
